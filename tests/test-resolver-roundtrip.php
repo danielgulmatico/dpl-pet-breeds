@@ -355,6 +355,49 @@ check( "all {$n} picker strings still resolve exactly as the map says, without t
 	$n > 100 && ! $moved, implode( ' | ', array_slice( $moved, 0, 4 ) ) );
 echo "\n";
 
+/* ---------------------------------------------------------------------------------- */
+echo "--- 7. Strings held for VetPost's review (2.5) ---\n";
+// breed-review.php holds, per species, the strings the 2026-10-14 audit found resolving to a
+// wrong or lossy breed. They must come back 'review', exactly as typed, with no suggestion - from
+// every rung, including part by part ("Other: Pug and Pug") and through another species' label
+// ("Other: Chinchilla cross" on a cat). The same string under another species is untouched.
+$review = include $plugin . '/includes/data/breed-review.php';
+$leaked = array();
+$n      = 0;
+foreach ( $review as $sp => $held ) {
+	foreach ( array_keys( $held ) as $key ) {
+		$n++;
+		$typed = ucwords( (string) $key ) . ' ';               // case and spacing must not matter
+		$c     = $C( $typed, $sp );
+		$r     = DPL_Breeds_Resolver::resolve( $typed, $sp );
+		if ( 'review' !== $c['status'] || trim( $typed ) !== $c['value'] || null !== $c['suggestion'] || '' === ( $c['reason'] ?? '' )
+			|| 'review' !== $r['status'] || 'held' !== $r['rung'] || $r['breeds'] ) {
+			$leaked[] = "{$sp}/{$key} -> \"{$c['value']}\" {$c['status']} / resolve {$r['status']}:{$r['rung']}";
+		}
+	}
+}
+check( "all {$n} held strings come back 'review', kept as typed, no suggestion", $n > 100 && ! $leaked, implode( ' | ', array_slice( $leaked, 0, 4 ) ) );
+
+// [ input, species, expected value, expected status ]
+$scoped = array(
+	array( 'Other: Pug and Pug',       'dog',          'Other: Pug and Pug',       'review' ),   // part by part gave "Pug (cross)"
+	array( 'Cavoodle and Mixed Breed', 'dog',          'Cavoodle and Mixed Breed', 'review' ),
+	array( 'Other: Chinchilla cross',  'cat',          'Other: Chinchilla cross',  'review' ),   // was the "other" species' Chinchilla
+	array( 'Short hair',               'guinea pig',   'Short hair',               'review' ),   // species spelled as the scanner does
+	array( 'DSH',                      'Canine (Dog)', 'DSH',                      'review' ),
+	array( 'Short hair',               'cat',          'Domestic Short Hair',      'resolved' ), // the same string, another species
+	array( 'DSH',                      'cat',          'Domestic Short Hair',      'resolved' ),
+	array( 'Staffy',                   'dog',          'Staffordshire Bull Terrier', 'resolved' ),
+	array( 'Short hair',               '',             'Domestic Short Hair',      'resolved' ), // no species: nothing to hold by
+);
+foreach ( $scoped as $s ) {
+	list( $in, $sp, $want, $status ) = $s;
+	$c = $C( $in, $sp );
+	check( sprintf( '%-25s [%s] -> %s %s', $in, '' === $sp ? 'no species' : $sp, $status, $want ),
+		$want === $c['value'] && $status === $c['status'], "got \"{$c['value']}\" {$c['status']}" );
+}
+echo "\n";
+
 echo "=================================\n";
 echo "  PASSED : {$pass}\n";
 echo "  FAILED : {$fail}\n";

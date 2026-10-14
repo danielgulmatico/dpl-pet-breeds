@@ -104,6 +104,30 @@ if ( ! function_exists( 'dpl_breed_list' ) ) {
 	}
 }
 
+if ( ! function_exists( 'dpl_breed_cross_names' ) ) {
+	/**
+	 * Single-word names that stand for a two-breed cross - "labradoodle", "cavoodle". Since 2.2.
+	 *
+	 * dpl_breed_search() finds breeds; a cross is two of them, so a picker that should offer
+	 * "Labradoodle = Labrador Retriever x Poodle" matches these itself, as the customer types.
+	 * Typo variants are included so a search finds the cross; show one row per `value`.
+	 *
+	 *   [ { key: 'labradoodle', name: 'Labradoodle', species: 'dog',
+	 *       breeds: ['Labrador Retriever', 'Poodle'], value: 'Labrador Retriever x Poodle',
+	 *       pets: 95 }, ... ]
+	 *
+	 * `value` is exactly what dpl_breed_canonicalise() stores for the name. `pets` is how many
+	 * pets in the live export use that spelling: when several spellings match, name the row
+	 * after the one with the most, so a typo never labels a cross.
+	 *
+	 * @param string $species '' for every species.
+	 * @return array[]
+	 */
+	function dpl_breed_cross_names( $species = '' ) {
+		return DPL_Breeds_Repository::cross_names( (string) $species );
+	}
+}
+
 if ( ! function_exists( 'dpl_breed_species' ) ) {
 	/**
 	 * Species that have a breed list.

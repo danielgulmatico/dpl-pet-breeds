@@ -39,7 +39,7 @@ if ( isset( $argv[1] ) && '--print-fingerprint' === $argv[1] ) {
 // ---- A throwaway copy of the data files, so the test can change them safely ----
 $tmp = sys_get_temp_dir() . '/dpl-breeds-reseed-' . getmypid();
 @mkdir( $tmp . '/includes/data', 0777, true );
-foreach ( array( 'breeds-seed.php', 'breed-map.php', 'breed-aliases.php' ) as $f ) {
+foreach ( array( 'breeds-seed.php', 'breed-map.php', 'breed-aliases.php', 'breed-review.php' ) as $f ) {
 	copy( $plugin . '/includes/data/' . $f, $tmp . '/includes/data/' . $f );
 }
 

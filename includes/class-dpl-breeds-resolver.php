@@ -47,6 +47,62 @@ class DPL_Breeds_Resolver {
 		return $map;
 	}
 
+	/**
+	 * Why a string is held for a person to review, or '' when it is not.
+	 *
+	 * breed-review.php lists, per species, the strings the 2026-10-14 audit found resolving to a
+	 * wrong or lossy breed. VetPost's admins decide those by hand, so no rung may answer for them -
+	 * not the map, not part by part, not an alias. Keyed by species because the same string can be
+	 * right for one and wrong for another: "short hair" is a Domestic Short Hair cat but not a
+	 * guinea pig. With no species, or one the vocabulary does not know, nothing is held.
+	 */
+	private static function held_reason( $raw, $species ) {
+		static $held = null;
+		if ( null === $held ) {
+			$path = DPL_BREEDS_PATH . 'includes/data/breed-review.php';
+			$held = file_exists( $path ) ? (array) require $path : array();
+		}
+		$sp  = DPL_Breeds_Repository::species_key( $species );
+		$key = DPL_Breeds_Repository::normalise( $raw );
+		if ( '' === $sp || ! isset( $held[ $sp ][ $key ] ) ) {
+			return '';
+		}
+		// An admin has said what it means (Pet Breeds -> Review): the hold has done its job. Only a
+		// "means X" decision lifts it - "keep as typed" must not let the string fall through to
+		// the map entry the hold was put there to stop.
+		if ( class_exists( 'DPL_Breeds_Review' ) && null !== DPL_Breeds_Review::decided_value( $raw, $species ) ) {
+			return '';
+		}
+		return (string) $held[ $sp ][ $key ];
+	}
+
+	/**
+	 * What an admin decided a string means in Pet Breeds -> Review, resolved; null if nothing was
+	 * decided, it was kept as typed, or the answer no longer resolves (its label was retired).
+	 *
+	 * The answer is a value this plugin can store, so resolving it is one exact lookup. The depth
+	 * guard stops a decision's answer being looked up as a decision in its own right.
+	 */
+	private static function decided( $raw, $species ) {
+		static $depth = 0;
+		if ( $depth || ! class_exists( 'DPL_Breeds_Review' ) ) {
+			return null;
+		}
+		$value = DPL_Breeds_Review::decided_value( $raw, $species );
+		if ( null === $value ) {
+			return null;
+		}
+		$depth++;
+		$r = self::resolve( $value, $species );
+		$depth--;
+		if ( 'resolved' !== $r['status'] ) {
+			return null;
+		}
+		$r['rung']       = 'decided';
+		$r['confidence'] = 1.0;
+		return $r;
+	}
+
 	/* ------------------------------------------------------------ map entries */
 
 	/**
@@ -99,6 +155,21 @@ class DPL_Breeds_Resolver {
 		$key = DPL_Breeds_Repository::normalise( $raw );
 		if ( '' === $key ) {
 			return $out;
+		}
+
+		// 0a. decided by an admin in Pet Breeds -> Review: a person's answer outranks every rung
+		$decided = self::decided( $key, $species );
+		if ( null !== $decided ) {
+			return apply_filters( 'dpl_breed_resolve_result', $decided, $raw, $species );
+		}
+
+		// 0b. held for a person (breed-review.php): an answer here would be the guess it exists to stop
+		$reason = self::held_reason( $key, $species );
+		if ( '' !== $reason ) {
+			$out['status'] = 'review';
+			$out['rung']   = 'held';
+			$out['reason'] = $reason;
+			return apply_filters( 'dpl_breed_resolve_result', $out, $raw, $species );
 		}
 
 		// 1. the reviewed map
@@ -442,6 +513,7 @@ class DPL_Breeds_Resolver {
 	 *   species    string  the species key used, '' if none matched
 	 *   suggestion array|null  a {slug,label} worth offering when not resolved
 	 *   request    array|null  the dpl_breed_request() result, if one was filed
+	 *   reason     string  2.5: only when the string is held for review (breed-review.php) - why
 	 * }
 	 */
 	public static function canonicalise( $raw, $species = '', array $context = array() ) {
@@ -458,6 +530,18 @@ class DPL_Breeds_Resolver {
 			'request'    => null,
 		);
 		if ( '' === $raw ) {
+			return $out;
+		}
+
+		// 0. Held for a person: kept exactly as supplied, with no suggestion - a suggestion is the
+		//    guess the hold exists to avoid. Checked before the part-by-part step, which would
+		//    otherwise answer for "Other: Pug and Pug" or "Cavoodle and Mixed Breed".
+		$reason = self::held_reason( $raw, $species );
+		if ( '' !== $reason ) {
+			$out['status']  = 'review';
+			$out['value']   = self::fit( $raw );
+			$out['changed'] = ( $out['value'] !== $raw );
+			$out['reason']  = $reason;
 			return $out;
 		}
 

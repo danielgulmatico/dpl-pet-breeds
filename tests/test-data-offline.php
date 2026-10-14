@@ -542,14 +542,76 @@ check( 'a typed phrase that merely contains "other" is kept; only the picker\'s 
 echo '  [INFO] ' . count( $map_aliases ) . " map aliases; {$excluded_picker} purebred picker strings left to the map rung\n\n";
 
 // =============================================================================
+// 6e. Held for review (2.5)
+// =============================================================================
+// breed-review.php: species => strings the 2026-10-14 audit found mapping to a wrong or lossy
+// breed. canonicalise() answers 'review' for them and VetPost's admins decide by hand. The
+// behaviour is proven in test-resolver-roundtrip.php section 7; these are the file's invariants.
+echo "--- 6e. Held for review ---\n";
+
+$review_file = $plugin . '/includes/data/breed-review.php';
+$review      = file_exists( $review_file ) ? include $review_file : null;
+check( 'breed-review.php returns a non-empty array', is_array( $review ) && $review );
+$review = (array) $review;
+
+$bad_species = array_diff( array_keys( $review ), array_keys( $seed ) );
+check( 'every held species has a breed list', ! $bad_species, implode( ', ', $bad_species ) );
+
+$unnormal = array();
+$is_label = array();
+$in_map   = array();
+// Map entries a held string keeps because other species use them correctly, or because
+// apply-signoff-research.mjs would put them back (see fix-audit-2026-10-14.mjs, KEEP).
+$shared   = array( 'short hair', 'dsh', 'staffy', 'burmese and other: tabby' );
+$held_n   = 0;
+foreach ( $review as $species => $held ) {
+	$own = array();
+	foreach ( $seed[ $species ] ?? array() as $r ) {
+		$own[ map_key( $r['label'] ) ] = true;
+	}
+	foreach ( (array) $held as $key => $why ) {
+		$held_n++;
+		if ( map_key( (string) $key ) !== (string) $key || '' === trim( (string) $why ) ) {
+			$unnormal[] = "{$species}/{$key}";
+		}
+		// A held canonical label could never be saved from the picker again.
+		if ( isset( $own[ (string) $key ] ) ) {
+			$is_label[] = "{$species}/{$key}";
+		}
+		// A map entry is also offered by the pickers - as a search alias or a crossbreed name -
+		// so a held string left in the map keeps offering the answer the hold withholds.
+		if ( isset( $map[ (string) $key ] ) && ! in_array( (string) $key, $shared, true ) ) {
+			$in_map[] = "{$species}/{$key}";
+		}
+	}
+}
+check( 'every held string is normalised and has a reason', ! $unnormal, implode( ', ', array_slice( $unnormal, 0, 4 ) ) );
+check( 'no held string is a canonical label of its species (the picker could not save it)', ! $is_label, implode( ', ', $is_label ) );
+check( 'no held string is still a map entry, apart from the shared ones', ! $in_map, implode( ', ', array_slice( $in_map, 0, 6 ) ) );
+$aliased = array();
+foreach ( (array) ( $vbo_aliases ?? array() ) as $species => $pairs ) {
+	foreach ( array_keys( (array) $pairs ) as $alias ) {
+		if ( isset( $review[ $species ][ $alias ] ) ) {
+			$aliased[] = "{$species}/{$alias}";
+		}
+	}
+}
+check( 'no held string is an ontology alias of its species', ! $aliased, implode( ', ', $aliased ) );
+check( 'the two bad ontology aliases behind held strings are gone (horse miniature, dog bully)',
+	! isset( $vbo_aliases['horse']['miniature'] ) && ! isset( $vbo_aliases['dog']['bully'] ) );
+echo "  [INFO] {$held_n} (species, string) pairs held across " . count( $review ) . " species\n\n";
+
+// =============================================================================
 // 7. Known gaps
 // =============================================================================
 // Asserted as CURRENT behaviour on purpose: when one is fixed this section fails, which is
 // the prompt to update it. A gap nobody is tracking is worse than a failing test.
 echo "--- 7. Known gaps (current behaviour, not desired) ---\n";
 
-check( 'KNOWN GAP: labxstaffy is recorded as a PUREBRED Labrador',
-	isset( $map['labxstaffy'] ) && 'Labrador Retriever' === DPL_Breeds_Resolver::format( $map['labxstaffy'] ) );
+// "labxstaffy recorded as a purebred Labrador" was tracked here. Since 2.5 it is held for
+// VetPost's review with the rest of the 2026-10-14 audit's strings, and its map entry is gone.
+check( 'labxstaffy is no longer a map entry; dogs typing it are held for review',
+	! isset( $map['labxstaffy'] ) && isset( $review['dog']['labxstaffy'] ) );
 
 // Open decision, not yet made: "?", "???" and "cat" mean nobody recorded the breed, not that
 // the pet is a cross. They inherited "Crossbreed" and so now read as "Mixed breed". Modelling

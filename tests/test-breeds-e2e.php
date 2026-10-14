@@ -497,7 +497,9 @@ if ( ! $cav_findable ) {
 	echo "         return nothing in the picker. Fix = multi-breed aliases.\n";
 }
 
-assert_equals( 'KNOWN GAP: labxstaffy is recorded as a PUREBRED Labrador', 'Labrador Retriever', e2e_stored( 'labxstaffy' ) );
+// Was "KNOWN GAP: labxstaffy is recorded as a PUREBRED Labrador". Since 2.5 it is held for
+// VetPost's review with the rest of the 2026-10-14 audit's strings (includes/data/breed-review.php).
+assert_equals( 'labxstaffy on a dog is held for review, not stored as a Labrador', '<review>', e2e_stored( 'labxstaffy', 'dog' ) );
 assert_equals( 'KNOWN GAP: "cross bred" is unmapped', '<unknown>', e2e_stored( 'cross bred' ) );
 echo "\n";
 

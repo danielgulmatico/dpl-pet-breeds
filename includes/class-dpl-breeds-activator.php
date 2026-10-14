@@ -65,7 +65,9 @@ class DPL_Breeds_Activator {
 	 */
 	public static function data_fingerprint() {
 		$parts = array( 'v' => DPL_BREEDS_VERSION );
-		foreach ( array( 'breeds-seed.php', 'breed-map.php', 'breed-aliases.php' ) as $file ) {
+		// breed-review.php is not seeded, but it changes what canonicalise() answers, and
+		// dpl-pet-profiles re-runs its breed migration when this fingerprint moves (2.5).
+		foreach ( array( 'breeds-seed.php', 'breed-map.php', 'breed-aliases.php', 'breed-review.php' ) as $file ) {
 			$path           = DPL_BREEDS_PATH . 'includes/data/' . $file;
 			$parts[ $file ] = file_exists( $path ) ? md5_file( $path ) : 'missing';
 		}

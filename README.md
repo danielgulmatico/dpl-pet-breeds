@@ -125,6 +125,13 @@ is off by default.
 It is idempotent: canonicalising a stored value changes nothing, which the tests prove for every
 map entry — including the `Other: <stored value>` form an edit screen posts back.
 
+**Held strings (2.5).** Some strings are held for a person: `includes/data/breed-review.php` lists,
+per species, the ones a 2026-10-14 audit found resolving to a wrong or lossy breed. For a held
+string of that species `canonicalise()` returns `review`, keeps the input exactly as supplied,
+offers no `suggestion`, and adds a `reason` (the audit's note). VetPost's admins decide them by
+hand in **Pet Breeds → Review** (2.6, below). The same string under another species, or with no
+species, is unaffected.
+
 Never build or split the stored form yourself. No canonical label contains `" x "`,
 `"(cross)"` or `" and "`, and the tests assert it — but that is this plugin's invariant to keep,
 not something a consumer should rely on.
@@ -133,7 +140,11 @@ not something a consumer should rely on.
 
 Strictest first, stopping at the first hit:
 
-1. **map** — the reviewed lookup of 2,151 source strings. Production never re-derives anything.
+0. **decided** (2.6) — an admin said what this string means for this species in Pet Breeds →
+   Review. Outranks everything, the hold included.
+0. **held** (2.5) — a string held for review for this species: always `review`, nothing else runs.
+   A "means X" decision lifts the hold; "keep as typed" does not.
+1. **map** — the reviewed lookup of 2,048 source strings. Production never re-derives anything.
 2. **stored** — a value this plugin wrote (`A x B`, `A (cross)`, `Mixed breed`, or a 1.x form).
    Accepted only if every component is *already* a canonical label verbatim, so free text such
    as `lab x staffy` is never reassembled from guesses.
@@ -162,7 +173,32 @@ do_action( 'dpl_breeds_reseeded', $added, $retired );
 do_action( 'dpl_breeds_auto_reseeded', $counts );   // 2.2: after an automatic re-seed only
 do_action( 'dpl_breed_request_created', $id, $data );
 do_action( 'dpl_breed_request_approved', $id, $breed_id );
+
+// 2.6 (API 2.3) - Pet Breeds -> Review. Implemented by a plugin that STORES breeds:
+apply_filters( 'dpl_breed_review_sources', $rows );          // add {source, species, text, count} rows
+apply_filters( 'dpl_breed_review_apply', $applied, $decision ); // write $decision['value'] to your records
+                                                              // holding any of $decision['variants']
+                                                              // ([species, text] as you reported them);
+                                                              // return $applied + how many changed
 ```
+
+## Review (2.6)
+
+**Pet Breeds → Review** lists every breed text the resolver cannot place, with how many pets hold
+it. This plugin never reads another plugin's records: the texts come from the plugins that store
+breeds (`dpl_breed_review_sources`; dpl-vp-pets 4.9.65 reports its active pets), grouped per
+species and text whatever the spelling. For each, an admin either:
+
+- **says what it means** — one or two labels, a cross, or Mixed breed, from the species' list.
+  Stored as a decision (option `dpl_breeds_review_decisions`), answered by the resolver from then
+  on (rung `decided`), so the same text typed anywhere later is stored as that breed. It is handed
+  to the consumers (`dpl_breed_review_apply`) to update the records that hold it now.
+- **keeps it as typed** — no record changes, the text leaves the queue, the hold stays.
+
+Decisions survive a re-seed (they are not in the shipped data) and can be undone from the page;
+undo does not revert records already updated - the consumer keeps their original (dpl-vp-pets in
+`breed_raw`). The closest list name is shown as a hint and never pre-selected. Decisions are
+logged to WooCommerce's log under `dpl-pet-breeds`. Nothing on the page runs by itself.
 
 ## Tables
 
@@ -187,9 +223,10 @@ the Breeds page shows when the last seed ran and whether it matches the installe
 
 `includes/data/` is generated, not hand-edited:
 
-- `breed-map.php` — 2,151 source strings → canonical breeds plus the cross flag
+- `breed-map.php` — 2,048 source strings → canonical breeds plus the cross flag
 - `breeds-seed.php` — 414 breed rows across 10 species
-- `breed-aliases.php` — 543 Vertebrate Breed Ontology `EXACT` synonyms for breeds already held
+- `breed-aliases.php` — 540 Vertebrate Breed Ontology `EXACT` synonyms for breeds already held
+- `breed-review.php` — 113 (species, string) pairs held for a person to review (2.5)
 
 The hard matching — ontology lookups, alias overrides, fuzzy matching, portmanteau
 decomposition — happens **once, offline, and gets reviewed** in the *Pet Breeds* workspace.
@@ -214,10 +251,11 @@ The moderated replacement for a free-text breed field:
 
 ```bash
 php tests/test-data-offline.php          # the data and pure logic - no WordPress needed
-php tests/test-resolver-roundtrip.php    # the real resolver over all 2,151 entries, in memory
+php tests/test-resolver-roundtrip.php    # the real resolver over all 2,048 entries, in memory
 php tests/test-auto-reseed.php           # when to re-seed, and the lock around it
+php tests/test-review.php                # Review decisions: the decided rung, the hold, the hand-off
 wp eval-file wp-content/plugins/dpl-pet-breeds/tests/test-breeds-e2e.php   # a live site
 ```
 
-The first three need nothing but PHP and exit non-zero on failure, so they can gate a build. All
-four are CLI-only and return 403 over HTTP.
+The offline ones need nothing but PHP and exit non-zero on failure, so they can gate a build. All
+are CLI-only and return 403 over HTTP.

@@ -124,6 +124,96 @@ class DPL_Breeds_Repository {
 
 	public static function flush() {
 		wp_cache_delete( 'vocabulary', 'dpl_breeds' );
+		wp_cache_delete( 'cross_names', 'dpl_breeds' );
+	}
+
+	/**
+	 * Names people search by that stand for TWO breeds - "labradoodle", "cavoodle", "spoodle".
+	 *
+	 * An alias row can only point at one breed, so these were never searchable: the picker found
+	 * "Australian Labradoodle" for "labradoodle" but never Labrador Retriever x Poodle. They come
+	 * from the breed map (one source of truth, nothing generated), limited to single-word names -
+	 * a portmanteau someone would type into a search box. Spelled-out pairs ("lab x staffy") and
+	 * squashed ones ("gsdxlab") still resolve when typed; they are just not offered.
+	 *
+	 * @param string $species '' for every species.
+	 * @return array[] {key, name, species, breeds: [A, B], value, pets}, ordered by key. Typo
+	 *                 variants of a name are kept (they help a search find it); consumers show one
+	 *                 row per value, named after the matching spelling with the most `pets`.
+	 */
+	public static function cross_names( $species = '' ) {
+		static $all = null;
+		if ( null === $all ) {
+			$cached = wp_cache_get( 'cross_names', 'dpl_breeds' );
+			if ( is_array( $cached ) ) {
+				$all = $cached;
+			} else {
+				$all = self::build_cross_names();
+				wp_cache_set( 'cross_names', $all, 'dpl_breeds', 5 * MINUTE_IN_SECONDS );
+			}
+		}
+		if ( '' === $species ) {
+			return $all;
+		}
+		return array_values( array_filter( $all, function ( $c ) use ( $species ) {
+			return $c['species'] === $species;
+		} ) );
+	}
+
+	private static function build_cross_names() {
+		$file   = DPL_BREEDS_PATH . 'includes/data/breed-map.php';
+		$map    = is_file( $file ) ? include $file : array();
+		// Pets per spelling, from the live export: names a cross after "labradoodle" rather than
+		// the typo "labradoddle" when a search matches both.
+		$file   = DPL_BREEDS_PATH . 'includes/data/cross-name-counts.php';
+		$counts = is_file( $file ) ? include $file : array();
+		$labels = array();
+		foreach ( self::vocabulary()['by_species'] as $sp => $rows ) {
+			foreach ( $rows as $r ) {
+				$labels[ $sp ][ $r['label'] ] = self::normalise( $r['label'] );
+			}
+		}
+
+		$out = array();
+		foreach ( (array) $map as $source => $breeds ) {
+			$source = (string) $source;
+			// One word, and not a squashed pair: "gsdxlab" is not a name anyone searches for.
+			if ( empty( $breeds['cross'] ) || ! preg_match( '/^[a-z]{4,}$/', $source ) || false !== strpos( $source, 'x' ) ) {
+				continue;
+			}
+			$pair = array();
+			foreach ( (array) $breeds as $k => $v ) {
+				if ( is_int( $k ) && is_string( $v ) ) {
+					$pair[] = $v;
+				}
+			}
+			if ( 2 !== count( $pair ) ) {
+				continue;
+			}
+			foreach ( $labels as $sp => $known ) {
+				if ( ! isset( $known[ $pair[0] ], $known[ $pair[1] ] ) ) {
+					continue;
+				}
+				// A name that is itself a breed in this species is that breed, not a cross.
+				if ( in_array( $source, $known, true ) ) {
+					break;
+				}
+				$value = DPL_Breeds_Resolver::format( $pair, true );
+				$out[] = array(
+					'key'     => $source,
+					'name'    => ucfirst( $source ),
+					'species' => $sp,
+					'breeds'  => DPL_Breeds_Resolver::decode( $value )['breeds'],
+					'value'   => $value,
+					'pets'    => (int) ( $counts[ $source ] ?? 0 ),
+				);
+				break;
+			}
+		}
+		usort( $out, function ( $a, $b ) {
+			return strcmp( $a['key'], $b['key'] );
+		} );
+		return $out;
 	}
 
 	/** Public shape for one breed. Consumers depend on these keys. */
