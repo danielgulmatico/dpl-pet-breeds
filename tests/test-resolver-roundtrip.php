@@ -266,7 +266,9 @@ check( 'multibyte text is cut on a character, leaving valid UTF-8',
 check( 'empty in, empty out', '' === $C( '   ' )['value'] && 'unknown' === $C( '' )['status'] );
 
 // Species, as the three writers spell it.
-foreach ( array( 'guinea pig' => 'guinea', 'Canine (Dog)' => 'dog', 'Feline' => 'cat', 'Dog' => 'dog', 'Equine' => 'horse', 'spaceship' => '' ) as $in => $want ) {
+// 'cattle' and 'Bovine' are '' until a cow species exists (2.7 lets an admin add one): a substring
+// match used to send cattle to the cat list and bovine to the sheep list ("ovine").
+foreach ( array( 'guinea pig' => 'guinea', 'Canine (Dog)' => 'dog', 'Feline' => 'cat', 'Dog' => 'dog', 'Equine' => 'horse', 'spaceship' => '', 'cattle' => '', 'Bovine' => '' ) as $in => $want ) {
 	check( sprintf( 'species "%s" -> "%s"', $in, $want ), $want === DPL_Breeds_Repository::species_key( $in ) );
 }
 

@@ -4,7 +4,7 @@ Centralised pet breed vocabulary for the VetPost plugins. It owns the canonical 
 resolves messy free-text breed strings to it, and exposes both through a stable API so no other
 plugin has to hold breed knowledge of its own.
 
-**API 2.1.** Crossbreed is a flag, not a breed, and `dpl_breed_canonicalise()` is the one write path. If you consumed 1.x, read
+**API 2.4.** Crossbreed is a flag, not a breed, and `dpl_breed_canonicalise()` is the one write path. If you consumed 1.x, read
 [Upgrading from 1.x](#upgrading-from-1x) before deploying — the most common 1.x call silently
 turns crosses into pedigrees.
 
@@ -97,8 +97,8 @@ Breaking changes, in order of how much damage they do if missed:
 | `dpl_breed_format( $r )` | The stored and display form. Pass the whole result, or a label list plus `$cross`. |
 | `dpl_breed_decode( $stored )` | Exact inverse of `format()`: `{breeds, cross}`. |
 | `dpl_breed_parse( $stored )` | Labels only, **no flag**. Kept for 1.x callers — never use it to write back. |
-| `dpl_breed_request( $raw, $species, $ctx )` | File an add-breed request. Returns a suggestion instead if it's a misspelling. |
-| `dpl_breed_canonicalise( $raw, $species, $ctx )` | **2.1.** Any input → the value to store in `wp_vpp_pets.breed`. **Every writer should use this.** |
+| `dpl_breed_request( $raw, $species, $ctx )` | File an add-breed request. Returns a suggestion instead if it's a misspelling. **2.4:** `$ctx` is remembered on the request - see [Say where a request came from](#say-where-a-request-came-from). |
+| `dpl_breed_canonicalise( $raw, $species, $ctx )` | **2.1.** Any input → the value to store in `wp_vpp_pets.breed`. **Every writer should use this.** The same `$ctx` keys apply when it files a request. |
 | `dpl_breed_species_key( $species )` | **2.1.** Any spelling → a vocabulary key: `Canine (Dog)` → `dog`, `guinea pig` → `guinea`. |
 | `dpl_breed_tokens()` | **2.1.** Separators and markers, for a UI that composes values client-side. |
 
@@ -124,6 +124,27 @@ is off by default.
 
 It is idempotent: canonicalising a stored value changes nothing, which the tests prove for every
 map entry — including the `Other: <stored value>` form an edit screen posts back.
+
+### Say where a request came from
+
+**API 2.4 (plugin 2.7).** When `request` is on and a genuinely new breed is typed, the request
+that gets filed remembers every occasion it was asked for: who, which pet, which order, which
+screen. That is what the admin approving it sees on Pet Breeds → Requests, so pass what you have:
+
+```php
+$c = dpl_breed_canonicalise( $posted, $species, array(
+	'request'  => true,
+	'pet_id'   => $pet_id,          // the pet being saved
+	'user_id'  => get_current_user_id(),   // defaults to this anyway
+	'order_id' => $order_id,        // if the pet is being saved for an order
+	'prescription_id' => $rx_id,    // if for a prescription
+	'source'   => 'my-pets',        // a key naming your screen: my-pets, staff-pet, prescription, scanner
+) );
+```
+
+Ids that are not positive integers are dropped; `source` is lower-cased to a key. Nothing else in
+the context is stored. The same keys work on `dpl_breed_request()`. Rows filed before 2.7 hold
+the first pet and user only, and the page shows them as the one occasion they are.
 
 **Held strings (2.5).** Some strings are held for a person: `includes/data/breed-review.php` lists,
 per species, the ones a 2026-10-14 audit found resolving to a wrong or lossy breed. For a held
@@ -171,8 +192,10 @@ apply_filters( 'dpl_breed_request_digest_recipients', $emails );
 do_action( 'dpl_breeds_ready', $api_version );
 do_action( 'dpl_breeds_reseeded', $added, $retired );
 do_action( 'dpl_breeds_auto_reseeded', $counts );   // 2.2: after an automatic re-seed only
-do_action( 'dpl_breed_request_created', $id, $data );
+do_action( 'dpl_breed_request_created', $id, $data );   // 2.4: $data also carries the occasion (who, pet, order, source)
 do_action( 'dpl_breed_request_approved', $id, $breed_id );
+do_action( 'dpl_breed_added', $breed_id, $species, $label, $source );   // 2.4: Add a breed, or an approval
+apply_filters( 'dpl_breed_request_pet_url', $url, $pet_id );            // 2.4: where the Requests page links a pet
 
 // 2.6 (API 2.3) - Pet Breeds -> Review. Implemented by a plugin that STORES breeds:
 apply_filters( 'dpl_breed_review_sources', $rows );          // add {source, species, text, count} rows
@@ -200,17 +223,47 @@ undo does not revert records already updated - the consumer keeps their original
 `breed_raw`). The closest list name is shown as a hint and never pre-selected. Decisions are
 logged to WooCommerce's log under `dpl-pet-breeds`. Nothing on the page runs by itself.
 
+## Adding a breed, and a species (2.7)
+
+**Pet Breeds → Breeds → Add a breed** puts a breed straight into the list, with no request to
+approve: a species (an existing one, or a new one typed in), the label, and optionally other
+spellings to alias. It goes through the same guards as an approval, in
+`DPL_Breeds_Vocabulary::add_breed()`, the one write path into the breed table outside the seed:
+
+- a label already active in that species is that breed - the row is left alone and any aliases
+  attach to it;
+- a label equal to another breed's under a different slug is refused (two labels for one breed);
+- a label the reviewed map sends elsewhere is refused (the map outranks a label, so the new breed
+  could never resolve to itself);
+- "Crossbreed", "Mixed breed", "unknown", "Other" and the like are refused under any casing -
+  crossbreed is a flag, not a breed - as is anything containing `" x "`, `"(cross)"` or `" and "`,
+  or longer than 56 characters (it must still fit the column with `" (cross)"`).
+
+A breed added this way has `source = 'admin'` and, like an approved request (`'request'`), is
+never retired or rebuilt by a re-seed. A retired breed added again is reactivated under its old
+id and moved to the manual source so it stays.
+
+**A species is not a table.** `dpl_breed_species()` is the species column of the active rows, so
+a species comes into being with its first breed and "add a species" is just that. Once it exists,
+`dpl_breed_species_key()` finds it by name and, for `cow`, by `bovine` and `cattle` too. What this
+plugin cannot do is put it in the other plugins' pet forms: dpl-vp-pets, the prescriptions admin
+and the scanner each list their species themselves, and the pets plugin's product matching needs
+`wp_vpp_attribute_category_map` rows for a new species. Add it there once it exists here. Note
+that the shipped list already carries `Angus` and `Cattle` under `other`; a real `cow` species
+would want those moved, which is a seed change for VetPost to sign off.
+
 ## Tables
 
 | Table | Notes |
 |---|---|
 | `{prefix}vpp_breeds` | The vocabulary. **Adopted** from dpl-pet-profiles v3.5 rather than duplicated, so existing rows and ids survive. |
-| `{prefix}vpp_breed_aliases` | Searchable synonyms. Rebuilt on re-seed from the map and the ontology; request-sourced aliases are preserved. |
-| `{prefix}vpp_breed_requests` | Add-breed moderation queue, deduped by `(species, normalised)`, status-aware. |
+| `{prefix}vpp_breed_aliases` | Searchable synonyms. Rebuilt on re-seed from the map and the ontology; aliases from requests and Add a breed are preserved. |
+| `{prefix}vpp_breed_requests` | Add-breed moderation queue, deduped by `(species, normalised)`, status-aware. **2.7:** `sources` holds every occasion as JSON (schema 1.1.0). |
 
 The re-seed **upserts on `(species, slug)` and never `DELETE + INSERT`**, because consumers may
-already hold a slug and reassigning ids would silently repoint their data. Breeds approved
-through the request queue live outside the shipped seed and are never retired by a re-seed.
+already hold a slug and reassigning ids would silently repoint their data. Breeds added by hand
+or approved through the request queue live outside the shipped seed and are never retired by a
+re-seed.
 
 **It runs automatically (2.2.0).** Updating the plugin's files does not run the seed, so the
 plugin records what it last seeded — its version plus a fingerprint of the data files — and the
@@ -240,10 +293,13 @@ The moderated replacement for a free-text breed field:
 1. Search finds nothing → offer to request it.
 2. `dpl_breed_request()` runs the resolver first. A misspelling returns a suggestion and **creates
    nothing**; a mixed breed is recorded as one. That absorbs most requests.
-3. Otherwise it upserts, so five people asking for the same breed is one row with a count of five.
+3. Otherwise it upserts, so five people asking for the same breed is one row with a count of five
+   - and, since 2.7, five occasions: who asked, from which pet, order and screen, shown on the
+   Requests page and in the digest.
 4. A daily digest goes to the admin. Approving adds the breed *and* aliases the requested wording
-   to it, so the same phrasing resolves next time. Approval refuses a label that would duplicate
-   an existing breed or be shadowed by the map.
+   to it, so the same phrasing resolves next time. Approving it *as* a breed already in the list
+   ("Testbreed" is just a Border Collie) adds the alias only. Approval refuses a label that would
+   duplicate another breed's or be shadowed by the map.
 5. Rejected strings keep counting. Three or more requests for something declined surfaces it
    again — repeated demand is how you learn a rejection was wrong.
 
@@ -254,6 +310,7 @@ php tests/test-data-offline.php          # the data and pure logic - no WordPres
 php tests/test-resolver-roundtrip.php    # the real resolver over all 2,048 entries, in memory
 php tests/test-auto-reseed.php           # when to re-seed, and the lock around it
 php tests/test-review.php                # Review decisions: the decided rung, the hold, the hand-off
+php tests/test-requests.php              # requests remember who asked; Add a breed; a re-seed keeps both
 wp eval-file wp-content/plugins/dpl-pet-breeds/tests/test-breeds-e2e.php   # a live site
 ```
 

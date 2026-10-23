@@ -46,6 +46,11 @@ if ( ! defined( 'ABSPATH' ) ) {
 // ---- Tiny assertion harness --------------------------------------------------
 // function_exists guards: the pet-profiles runner defines the same helpers, and both may
 // be loaded in one WP-CLI process.
+//
+// `global` because `wp eval-file` includes this file inside a function: without it these are
+// locals, the assertions below count into the globals instead, and the summary printed
+// "PASSED : 0 / FAILED : 0" whatever happened - so a failing run looked clean (found 2026-10-21).
+global $pass, $fail, $skip, $errors;
 $pass   = 0;
 $fail   = 0;
 $skip   = 0;
@@ -593,13 +598,30 @@ if ( ! $writes ) {
 	assert_true( 'declined_but_wanted() surfaces it',
 		! empty( DPL_Breeds_Requests::declined_but_wanted( 2 ) ) );
 
-	// approve() must refuse to create a bin split.
-	$clash = dpl_breed_request( 'zzz-e2e-clash-' . gmdate( 'His' ), 'dog' );
-	$err   = DPL_Breeds_Requests::approve( (int) $clash['request_id'], 'Border Collie', 'dog' );
-	assert_true( 'approving a label that already exists is refused',
-		is_wp_error( $err ) && 'duplicate_label' === $err->get_error_code() );
+	// 2.7: every occasion is recorded on the request - who, which pet, which order, which screen.
+	$ctx_req = dpl_breed_request( $novel, 'dog', array( 'pet_id' => 331, 'order_id' => 987654, 'source' => 'prescription' ) );
+	$srcs    = DPL_Breeds_Requests::sources( $wpdb->get_var( $wpdb->prepare(
+		"SELECT sources FROM `$requests_t` WHERE id = %d", (int) $first['request_id'] ) ) );
+	assert_true( 'a repeat request appends where it came from',
+		count( $srcs ) >= 3 && 331 === (int) end( $srcs )['pet_id'] && 987654 === (int) end( $srcs )['order_id']
+		&& 'prescription' === end( $srcs )['source'] );
 
-	// ...and must refuse a label the reviewed map already sends elsewhere, which would leave
+	// Approving as a breed that is already there means "that wording is this breed": an alias,
+	// and the breed's row untouched. (Until 2.7 this was meant to be refused, but the guard only
+	// ever caught a label under a DIFFERENT slug, so it quietly re-sourced the existing row.)
+	$as_bc_text = 'zzz-e2e-asbc-' . gmdate( 'His' );
+	$as_bc_req  = dpl_breed_request( $as_bc_text, 'dog' );
+	$bc_before  = $wpdb->get_row( $wpdb->prepare(
+		"SELECT * FROM `$breeds_tt` WHERE species = 'dog' AND slug = %s", 'border-collie' ), ARRAY_A );
+	$as_bc = DPL_Breeds_Requests::approve( (int) $as_bc_req['request_id'], 'Border Collie', 'dog' );
+	assert_true( 'approving as an existing breed names that breed', (int) $as_bc === (int) $bc_before['id'] );
+	assert_equals( 'and leaves its row as it was', $bc_before, $wpdb->get_row( $wpdb->prepare(
+		"SELECT * FROM `$breeds_tt` WHERE id = %d", (int) $bc_before['id'] ), ARRAY_A ) );
+	// By the exact text filed, never a recomputed timestamp: the second can tick over in between.
+	$wpdb->delete( $wpdb->prefix . DPL_BREEDS_ALIAS_TABLE, array( 'species' => 'dog', 'alias' => strtolower( $as_bc_text ) ) );
+	$clash = dpl_breed_request( 'zzz-e2e-clash-' . gmdate( 'His' ), 'dog' );
+
+	// approve() must refuse a label the reviewed map already sends elsewhere, which would leave
 	// the new breed unreachable behind rung 1.
 	// "Staffy": a map key sending the word to Staffordshire Bull Terrier. (This used "Collie" until
 	// 2026-10-14, when Collie became a breed of its own.)
@@ -623,16 +645,36 @@ if ( ! $writes ) {
 	$res = dpl_breed_resolve( $keep_label, 'dog' );
 	assert_equals( 'an approved breed resolves afterwards', 'resolved', $res['status'] );
 
+	// 2.7: Add a breed, under a species that does not exist yet, survives a re-seed the same way.
+	$cow_sp = 'zzzcow' . gmdate( 'His' );
+	$cow_id = DPL_Breeds_Vocabulary::add_breed( $cow_sp, 'ZZZ Hereford', array( 'zzz white face' ), 'admin' );
+	assert_true( 'a breed can be added by hand under a new species', is_int( $cow_id ) && $cow_id > 0 );
+	assert_true( 'the species exists at once', in_array( $cow_sp, dpl_breed_species(), true ) );
+	assert_equals( 'its alias resolves at once', 'ZZZ Hereford', dpl_breed_canonicalise( 'zzz white face', $cow_sp )['value'] );
+	DPL_Breeds_Activator::seed( true );
+	DPL_Breeds_Repository::flush();
+	assert_equals( 'a re-seed does NOT retire a breed added by hand', 'active',
+		$wpdb->get_var( $wpdb->prepare( "SELECT status FROM `$breeds_tt` WHERE id = %d", (int) $cow_id ) ) );
+	assert_equals( 'nor drop its alias', 'ZZZ Hereford', dpl_breed_canonicalise( 'zzz white face', $cow_sp )['value'] );
+	$wpdb->delete( $wpdb->prefix . DPL_BREEDS_ALIAS_TABLE, array( 'breed_id' => (int) $cow_id ) );
+	$wpdb->delete( $breeds_tt, array( 'id' => (int) $cow_id ) );
+
 	// Clean up every artefact this section created.
 	$wpdb->delete( $wpdb->prefix . DPL_BREEDS_ALIAS_TABLE, array( 'breed_id' => (int) $keep_id ) );
 	$wpdb->delete( $breeds_tt, array( 'id' => (int) $keep_id ) );
 	$removed = 0;
-	foreach ( array( $first['request_id'] ?? 0, $rej_id, $clash['request_id'] ?? 0, $keep_req['request_id'] ?? 0 ) as $rid ) {
+	foreach ( array( $first['request_id'] ?? 0, $rej_id, $as_bc_req['request_id'] ?? 0, $clash['request_id'] ?? 0, $keep_req['request_id'] ?? 0 ) as $rid ) {
 		if ( $rid ) {
 			$removed += (int) $wpdb->delete( $requests_t, array( 'id' => (int) $rid ) );
 		}
 	}
-	assert_true( 'test artefacts cleaned up', $removed >= 4 );
+	assert_true( 'test artefacts cleaned up', $removed >= 5 );
+	// The count above only proves what this run remembered to delete. On 2026-10-21 a reused
+	// variable left one request behind while it still passed, so check the tables themselves.
+	$left = (int) $wpdb->get_var( "SELECT COUNT(*) FROM `$requests_t` WHERE normalised LIKE 'zzz-e2e-%'" )
+		+ (int) $wpdb->get_var( "SELECT COUNT(*) FROM `{$wpdb->prefix}" . DPL_BREEDS_ALIAS_TABLE . "` WHERE alias LIKE 'zzz%'" )
+		+ (int) $wpdb->get_var( "SELECT COUNT(*) FROM `$breeds_tt` WHERE label LIKE 'ZZZ %' OR species LIKE 'zzzcow%'" );
+	assert_equals( 'no test row is left in any breed table', 0, $left );
 	DPL_Breeds_Repository::flush();
 }
 echo "\n";
@@ -651,3 +693,6 @@ if ( $fail > 0 ) {
 	}
 }
 echo "=================================\n\n";
+
+// Non-zero on failure, so the live run can gate a release like the offline suites do.
+exit( $fail > 0 ? 1 : 0 );

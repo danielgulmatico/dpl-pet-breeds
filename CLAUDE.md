@@ -228,16 +228,229 @@ the page's save/keep/undo/refresh handlers rebuild the queue before redirecting.
 (badge 8 -> 7 on the page right after a Keep, back to 8 after Undo); `test-review.php` 28. The
 production package is `Pet Breeds/release-2026-10-14/dpl-pet-breeds-2.6.1.zip`.
 
+## Add a breed, add a species, and who asked (2.7.0, API 2.4, schema 1.1.0)
+
+Daniel's three issues, 2026-10-21: "need to be able to add a breed", "need a 'cow' species, or
+maybe just be able to add a species?", and "where did the breed requests come from? ... user_id,
+pet_id, order_id". **On staging since 2026-10-21 16:04 NZ**, not on production; release log below.
+The consumer halves are done but uncommitted and not deployed: dpl-pet-profiles 4.9.74 (species
+selects from `dpl_breed_species()`, `source` my-pets / staff-pet) and vet-pharmacy-prescriptions
+2.0.5 (`order_id`, `prescription_id`, `source` prescription).
+
+- **Pet Breeds → Breeds → Add a breed.** Until 2.7 the only way a breed entered the vocabulary
+  outside the seed was a customer typing "Other: X" and an admin approving it; staging's one
+  request ("Testbreed Notarealdog") shows how rarely that happens. The form takes a species (an
+  existing one or a new one typed in), the label, and optional "also known as" spellings, and
+  calls `DPL_Breeds_Vocabulary::add_breed()` - now the ONE write path into the table outside the
+  seed; `DPL_Breeds_Requests::approve()` calls it too, so the guards live once. `source = 'admin'`,
+  exempt from the re-seed's retire pass alongside `'request'` (`MANUAL_SOURCES`). A retired row
+  added again is reactivated and moved to the manual source, or the next re-seed retired it again.
+- **Adding as a label that is already there is an alias, not an error.** The old `duplicate_label`
+  guard compared `slug <> slug`, so for a label whose slug is the existing one it never fired:
+  approving "Testbreed" as "Border Collie" silently re-sourced the Border Collie row to 'request'
+  and aliased the wording. Now the active row is left untouched and only the alias attaches, which
+  is what an admin means by it. The guard still refuses a label equal to another breed's under a
+  different slug (none shipped is; the test plants one). The map-shadow guard compares normalised,
+  so re-adding "border collie" is not "shadowed" by the map's Border Collie.
+- **A species is the species column**, so "add a species" is add_breed() under a new key:
+  `species_for_new()` takes an existing species by any spelling, else slugifies to a new key
+  (`/^[a-z][a-z0-9-]{2,31}$/`). `species_key()` learned `bovine`/`cattle` → `cow` (only once cow
+  exists) and now matches whole words: by substring, "cattle" was a **cat** and "Bovine" a **sheep**
+  ("ovine"). The shipped list already has `Angus` and `Cattle` under `other`, so a real cow species
+  would want those moved - a seed change for VetPost. The other plugins hardcode their species
+  lists (dpl-vp-pets template and staff form, VPPP, the scanner) and dpl-vp-pets' product matching
+  needs `vpp_attribute_category_map` rows per species, so a new species here is not pickable until
+  they are updated: follow-up in those repos, proposed, not done.
+- **Requests remember every occasion.** `vpp_breed_requests.sources` (longtext JSON, schema
+  1.1.0 - `maybe_upgrade()` adds it by dbDelta and forgets `dpl_breeds_seeded`, so the next staff
+  page load re-seeds once) holds up to 50 of `{at, user_id, pet_id, order_id, prescription_id,
+  source}`, appended on the first request and on every repeat, pending or rejected. The first
+  requester stays in `pet_id`/`user_id`. `DPL_Breeds_Requests::occasion()` is pure: positive ints
+  only, `source` as a key, `user_id` defaulting to the current user. The Requests page has an
+  "Asked by" column (newest five: date, user link with "(staff)", pet link via
+  `dpl_breed_request_pet_url` defaulting to dpl-vp-pets' edit screen, order link via WooCommerce,
+  screen name) and the digest says where each was last asked from. The consumers pass `pet_id` and
+  `user_id` today; `order_id`, `prescription_id` and `source` need their call sites updated
+  (dpl-vp-pets `canonicalise_breed()`, VPPP `VPPP_Breeds::canonicalise()`) - proposed, not done.
+- `DPL_Breeds_Repository::flush()` now also forgets the per-request vocabulary and cross-names
+  copies (they were static locals, so a breed added in a request was invisible to `resolve()`
+  until the next request; the admin pages redirected, so nothing noticed, but the new test did).
+- `php tests/test-requests.php` (82): a stand-in for the three tables that answers the exact
+  queries, loaded by the real `seed()`. Four mutants (no append on repeat, latin by substring,
+  'admin' not exempt, re-add rewriting the row) each fail 2-4 checks. E2E section 13 gained the
+  sources, the alias-on-approve semantics, an admin add that survives `seed()`, and a final check
+  that no `zzz` test row is left in any of the three tables.
+- **The E2E runner never reported a failure under WP-CLI** (fixed 2026-10-21). `wp eval-file`
+  includes the file inside a function, so `$pass`/`$fail` were locals while the assertions counted
+  into globals: the summary always read "PASSED : 0 / FAILED : 0", and there was no exit code at
+  all. Every earlier "E2E passed" on staging was read off the [PASS]/[FAIL] lines, not the summary.
+  Now `global` plus `exit( $fail ? 1 : 0 )`; a copy with one forced failure exits 1.
+
+```
+## Release dpl-pet-breeds 2.7.0 - staging
+Commit/tag:        none - deployed from the working tree on Daniel's go-ahead (base 84165ca)
+Deployed:          2026-10-21 16:04 NZ by Claude for Daniel, tar over SSH (rsync is not installed
+                   on Daniel's PC; `tar -czf - ... | ssh vetpost-staging "tar -xzf - -C ..."`)
+Files verified:    yes - header 2.7.0 / API 2.4.0, md5 of requests, vocabulary and admin match local
+OPcache + caches:  validate_timestamps=1, revalidate_freq=2: picked up without restart; no front-end
+                   file changed, no purge needed
+Upgraders:         schema 1.0.0 -> 1.1.0, `sources` column added; re-seeded once under WP-CLI
+                   (414 active rows, as shipped; matches the installed files)
+Verified:          E2E with writes 124 pass / 0 fail, exit 0, no test rows left; read-only 100 / 0.
+                   As admin (user 1, wp eval): Breeds page has Add a breed with the new-species
+                   field; Requests shows "Asked by" for the real request (18 Sep, Daniel
+                   Gulmatico (staff), pet #331 - pre-2.7, from the columns).
+                   NOT verified in a browser, and no breed or species added for real.
+Rollback:          ~/private_html/deploy-backups/dpl-pet-breeds-2.6.1-2026-10-21-0303.tar.gz
+                   (the `sources` column can stay; 2.6.1 ignores it)
+Package:           Pet Breeds/release-2026-10-21/dpl-pet-breeds-2.7.0.zip (bsdtar, forward-slash
+                   paths - PowerShell 5.1's Compress-Archive writes backslashes, which unpack on
+                   Linux as file names containing "\")
+```
+
+The first E2E run left one approved test request behind (a reused variable dropped it from the
+cleanup list) while still passing "test artefacts cleaned up"; it was deleted by id and the test
+now checks the tables themselves.
+
+**Consumers and a real cow species on staging, 2026-10-21 16:20 NZ** (Daniel: "deploy dpl-vp-pets
+4.9.74 and vet-pharmacy-prescriptions 2.0.5 to staging, then add a cow species with one breed").
+Recorded here because other sessions were editing both consumer repos at the time.
+
+```
+## Release dpl-vp-pets 4.9.74 (species only) - staging
+Built from:        staging's own 4.9.73 + the six species files from the dpl-pet-profiles working
+                   tree (dpl-vp-pets.php, includes/class-dpl-vp-pets-db.php,
+                   admin/class-dpl-vp-pets-backend.php, public/class-dpl-vp-pets-frontend.php,
+                   public/partials/template-my-pets.php, tests/test-species-options.php).
+                   NOT the whole tree: it also holds a "Database character set" tool (latin1 ->
+                   utf8mb4, class-dpl-vp-pets-charset*.php, activator charset clauses) that the
+                   running "Reminder email template setup" session was still writing. Its release
+                   must not reuse 4.9.74 - staging already has a 4.9.74 without it.
+Files verified:    md5 of all six match; php -l clean; Plugins list 4.9.74
+Tests (the build): species-options 27, staff-breed-form passes to section 5 then dies on
+                   MINUTE_IN_SECONDS (stub missing; same against breeds 2.6.1 - test env only),
+                   email-optins-hidden 27/1 (expects LF; working copies are CRLF - same on 4.9.73)
+Rollback:          ~/private_html/deploy-backups/dpl-pet-profiles-4.9.73-2026-10-21-0318.tar.gz
+
+## Release vet-pharmacy-prescriptions 2.0.5 - staging
+Built from:        a snapshot of the working tree taken before the dropdown session started
+                   editing it; staging-vs-snapshot (CR-insensitive, 292 php/js/css files) differed
+                   in exactly the four 2.0.5 files, and only those were sent.
+Files verified:    md5 match; php -l clean; Plugins list 2.0.5; test-breeds-integration 50/0
+Rollback:          ~/private_html/deploy-backups/vet-pharmacy-prescriptions-2.0.4-2026-10-21-0318.tar.gz
+
+## Cow species
+Added:             cow / Hereford (breed id 453, source admin, alias "hereford cattle") through
+                   DPL_Breeds_Vocabulary::add_breed() as user 1; logged under dpl-pet-breeds.
+                   Resolves as "Hereford" for cow, "Bovine" and "cattle"; "Hereford x" ->
+                   "Hereford (cross)". Undo: retire row 453 (status = 'retired'), never delete.
+Pet forms:         cow offered in My Pets add + edit (latest UI) and the staff pet screen, as
+                   staff. NOT for customers: vpp_launch_to_everyone is off, so they get the frozen
+                   -stable template with its ten (checked as customer user 16). NOT in the
+                   prescriptions admin or the scanner yet (session "VPPP and scanner: species
+                   dropdown from breed API" is building that).
+Not set up:        product matching (no vpp_attribute_category_map rows for cow); Angus and
+                   Cattle still sit under `other`.
+Found:             species_options() keeps stored species as RAW text, so user 1's My Pets offers
+                   "Canine" and a second "Dog" - in the ADD form too. Sent to the species session
+                   to fix; must be fixed before production.
+                   daniel@digitalpie.co.nz is user 63 and an ADMINISTRATOR on staging, not the
+                   plain Customer the release procedure assumes; use a real customer to check.
+Breed migration:   dpl-vp-pets' automatic breed migration is switched on on staging and re-ran when
+                   breeds 2.7.0 landed: 122 pets scanned, 0 changed.
+```
+
+**Round 2 on staging, 2026-10-21 19:58 NZ** (Daniel: "put those who are not in staging to that
+place"). Eleven runtime files, no tests or notes (the release procedure now ships runtime files
+only). Each repo was snapshotted and every php/js/css file diffed against staging, CR-insensitive,
+before sending; the diffs were exactly the three changes below.
+
+```
+## Release dpl-vp-pets 4.9.74 (species fix) - staging
+What:              species keep-list fix: Add form lists real species only; a stored "Canine" /
+                   "Canine (Dog)" / "Dog" selects dog (species_select_value(), petData species_key,
+                   one JS line) instead of adding an option. Version NOT bumped - still 4.9.74, same
+                   as round 1; assets are versioned by file time (4.9.71), so the JS change reaches
+                   browsers. Files: backend, db, frontend, template-my-pets.php, frontend JS.
+                   The charset tool is no longer in the tree; "My Account and Pet Profiles
+                   improvements" was running in the repo, but none of its work was in these files.
+Note:              saving an edited pet stored as "Canine" now stores "dog".
+Rollback:          deploy-backups/dpl-pet-profiles-4.9.74-species-2026-10-21-0657.tar.gz
+
+## Release vet-pharmacy-prescriptions 2.0.6 - staging
+What:              species select (staff pet form) and add-pet modal from dpl_breed_species();
+                   label codes moved to VPPP_Breeds::species_code(), a species with no code prints OT.
+Rollback:          deploy-backups/vet-pharmacy-prescriptions-2.0.5-2026-10-21-0657.tar.gz
+
+## Release dpl-prescriptions-ai 1.8.8 - staging
+What:              scanner edit page species select from dpl_breed_species().
+Rollback:          deploy-backups/dpl-prescriptions-ai-1.8.7-2026-10-21-0657.tar.gz
+
+Pre-flight:        php -l + node --check clean; tests on the snapshots: pets 10 suites all pass
+                   (species-options 49, staff-breed-form 50, email-optins-hidden 28), VPPP
+                   breeds-integration 50 + species-options 22, scanner breeds-ai 41 + species 13.
+Files verified:    md5 of all 11 match; Plugins list 4.9.74 / 2.0.6 / 1.8.8; no new PHP errors
+                   (split-orders-add-on's session_start warnings predate this).
+Verified (wp eval, not a browser):
+                   cow in My Pets add + edit and the staff pet screen (admin), VPPP list and
+                   add-pet modal, scanner list. My Pets for admin user 1 no longer offers "Canine"
+                   or a second "Dog". Staff screen, pet #19 stored "Canine": dog pre-selected.
+                   Customer user 16: unchanged ten, no cow (launch switch off).
+Gap:               VPPP and the scanner copied the round-1 rule, so a pet stored as "Canine" shows
+                   an extra "Canine" option (selected) on those two screens. No data loss; should get
+                   the same species_select_value() mapping before production.
+Server leftovers:  round 1 and the 2.7.0 deploy put tests/ (and dpl-pet-breeds' CLAUDE.md,
+                   README.md) on staging, which the new runtime-only policy forbids. Not removed.
+```
+
+**Round 3 on staging, 2026-10-21 20:10 NZ** (Daniel: "give VPPP and the scanner the same Canine ->
+dog mapping as the pets plugin, test it, and deploy to staging"). Done in this session.
+
+```
+## Release vet-pharmacy-prescriptions 2.0.7 - staging
+What:              VPPP_Breeds::species_select_value() (same rule as dpl-vp-pets 4.9.74);
+                   species_options() keeps only a stored value that maps to nothing; the
+                   prescription pet form selects the mapped key; fetch_pet_data() adds species_key;
+                   vppp-prescriptions-backend.js and vppp-orders-backend.js set the select from
+                   pet.species_key || pet.species (it went blank for a stored "Canine").
+Tests:             species-options 41 (was 22), breeds-integration 50. Mutants caught: keep raw
+                   again (6 fail), no mapping (6), orders JS raw (1).
+Rollback:          deploy-backups/vet-pharmacy-prescriptions-2.0.6-2026-10-21-0707.tar.gz
+
+## Release dpl-prescriptions-ai 1.8.9, then 1.8.10 - staging
+What:              1.8.9: EditPage::species_select_value(), the same keep rule, the "Animal" select
+                   selects the mapped key, the pet picker reads species_key. 1.8.10: adding a NEW pet
+                   from a scan copied the scanned text into the select (blank for "Canine"/"Dog");
+                   the scanned species box now carries data-species-key, used while the text is as
+                   scanned, an edited text matched lower-cased.
+Tests:             species-options 24 (was 13), breeds-ai 41. Mutants caught: select raw (1), keep
+                   raw (4), and for 1.8.10 ignore the attribute / no lower-case / no attribute (1
+                   each) - after tightening the check, which first let the attribute mutant pass.
+Rollback:          deploy-backups/dpl-prescriptions-ai-1.8.9-2026-10-21-0709.tar.gz
+                   (1.8.8: deploy-backups/dpl-prescriptions-ai-1.8.8-2026-10-21-0707.tar.gz)
+
+Deploy:            each repo diffed against staging first (only these files differed), backed up,
+                   runtime files only, md5 of all files match, php -l clean, Plugins list 2.0.7 /
+                   1.8.10, no new PHP errors.
+Verified (wp eval, not a browser):
+                   both plugins: Canine, Canine (Dog), Dog -> dog; Bovine, cow -> cow; Unicorn kept;
+                   options for a pet stored Canine are the eleven with no "Canine". fetch_pet_data
+                   for pet #19 (stored "Canine") returns species_key "dog".
+                   NOT rendered on staging: the scanner review page with a real scan (needs a scan
+                   record), so 1.8.10's data-species-key path is proven by tests only.
+```
+
 ## Tests
 
 Two layers. Run the offline suites on every change; they need nothing but PHP.
 
 ```bash
 php tests/test-data-offline.php          # 95 checks
-php tests/test-resolver-roundtrip.php    # 73 checks
+php tests/test-resolver-roundtrip.php    # 75 checks
 php tests/test-auto-reseed.php           # 30 checks
 php tests/test-cross-names.php           # 23 checks
-php tests/test-review.php                # 24 checks
+php tests/test-review.php                # 28 checks
+php tests/test-requests.php              # 82 checks (2.7)
 ```
 
 The offline test proves the invariants that make the design safe, over all 2,048 map entries
@@ -257,7 +470,8 @@ The live layer needs a real site and WP-CLI:
 wp eval-file wp-content/plugins/dpl-pet-breeds/tests/test-breeds-e2e.php
 ```
 
-Read-only by default, so it is safe against production. The two sections that write — seed
+Read-only by default, so it is safe against production. It exits non-zero on a failure (since
+2026-10-21; before that the summary always read zero). The two sections that write — seed
 idempotency and the request queue — are skipped unless you opt in with
 `DPL_BREEDS_E2E_WRITES=1`, and both clean up after themselves. Both runners are CLI-only and
 return 403 over HTTP.
@@ -315,7 +529,17 @@ Known gaps, all asserted as current behaviour so fixing one fails a test:
   hair" is a cat's Domestic Short Hair) and with no species at all. And a map entry or a label of
   another species still answers when nothing is held: a cat typed "Dachshund" stores the dog
   breed (7 such pets on the live export, none flagged by the audit). Not changed in 2.5;
-  VetPost's review page shows them only once they are held or unmatched.
+  VetPost's review page shows them only once they are held or unmatched. 2.7's test shows the
+  same thing for a new species: "Hereford x Angus" under cow resolves because Angus is an `other`
+  label.
+- **`UNIQUE(species, slug)` on `wp_vpp_breeds` does not exist on staging** (found 2026-10-21).
+  Four retired dog rows inherited from dpl-pet-profiles v3.5 have an empty slug (ids 26 Cavoodle,
+  28 Cocker Spaniel, 30 Corgi, 56 Mixed Breed), so dbDelta's `ADD UNIQUE KEY species_slug` fails
+  with "Duplicate entry 'dog-'" - logged in August on activation and again on every schema bump.
+  Nothing relies on the key (seed and add_breed() select before writing), and the alias and
+  request tables' unique keys, which the DSH defence and request dedupe DO rely on, are present.
+  Fix: give those retired rows unique slugs, then let dbDelta add the key. Production probably has
+  the same rows; check before its schema bump. Not done - a data change for Daniel to approve.
 - Seed rows still carrying another species' ontology id, which `gen-vbo-aliases.mjs` mines for
   aliases ("myanmar swamp buffalo" and "bama kywe" find the Burmese cat, "iranian" the Persian):
   Burmese, Persian, Bengal, Siamese, Manx, Siberian (cat); Maltese, Greyhound, Pomeranian,

@@ -3,7 +3,7 @@
  * Plugin Name:       DPL Pet Breeds
  * Plugin URI:        https://digitalpie.co.nz
  * Description:       Centralised pet breed vocabulary. Owns the canonical breed list, resolves messy free-text breed strings to it, and exposes both to other plugins via a stable API.
- * Version:           2.6.1
+ * Version:           2.7.0
  * Author:            Digital Pie
  * License:           GPL-2.0+
  * Text Domain:       dpl-pet-breeds
@@ -13,7 +13,7 @@
 
 defined( 'ABSPATH' ) || exit;
 
-define( 'DPL_BREEDS_VERSION', '2.6.1' );
+define( 'DPL_BREEDS_VERSION', '2.7.0' );
 
 /**
  * The API contract version, separate from the plugin version.
@@ -21,7 +21,7 @@ define( 'DPL_BREEDS_VERSION', '2.6.1' );
  * Consumers check this, not DPL_BREEDS_VERSION. Semver: the major only changes when a
  * documented return shape changes. Never break a shape within a major.
  */
-define( 'DPL_BREEDS_API_VERSION', '2.3.0' );
+define( 'DPL_BREEDS_API_VERSION', '2.4.0' );
 
 define( 'DPL_BREEDS_FILE', __FILE__ );
 define( 'DPL_BREEDS_PATH', plugin_dir_path( __FILE__ ) );
@@ -41,6 +41,8 @@ define( 'DPL_BREEDS_REQUEST_TABLE', 'vpp_breed_requests' );
 require_once DPL_BREEDS_PATH . 'includes/class-dpl-breeds-activator.php';
 require_once DPL_BREEDS_PATH . 'includes/class-dpl-breeds-repository.php';
 require_once DPL_BREEDS_PATH . 'includes/class-dpl-breeds-resolver.php';
+// The one write path into the breed table outside the seed: Add a breed, and approving a request.
+require_once DPL_BREEDS_PATH . 'includes/class-dpl-breeds-vocabulary.php';
 require_once DPL_BREEDS_PATH . 'includes/class-dpl-breeds-requests.php';
 // Always: the resolver reads Review's decisions on every request, not only in wp-admin.
 require_once DPL_BREEDS_PATH . 'includes/class-dpl-breeds-review.php';
@@ -102,6 +104,11 @@ add_action( 'admin_post_dpl_breeds_reseed', function () {
 add_action( 'admin_post_dpl_breeds_request_action', function () {
 	require_once DPL_BREEDS_PATH . 'admin/class-dpl-breeds-admin.php';
 	DPL_Breeds_Admin::handle_request_action();
+} );
+// Pet Breeds -> Breeds -> Add a breed (2.7). Under a new species key, this is also "add a species".
+add_action( 'admin_post_dpl_breeds_add_breed', function () {
+	require_once DPL_BREEDS_PATH . 'admin/class-dpl-breeds-admin.php';
+	DPL_Breeds_Admin::handle_add_breed();
 } );
 
 // Daily digest of pending add-breed requests.

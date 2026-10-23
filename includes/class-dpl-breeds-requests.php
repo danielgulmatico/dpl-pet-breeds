@@ -5,12 +5,23 @@
  * Replaces the free-text escape hatch. Nothing here writes to the breed table directly; a
  * request has to be approved. That approval step is the whole anti-regrowth mechanism.
  *
+ * Since 2.7 a request remembers where it came from. Until then a row held the first pet and
+ * user only, and the admin page showed neither, so "Testbreed Notarealdog x3" gave the person
+ * approving it nothing to go on. Now every occasion the string is asked for is appended to
+ * `sources` - who, which pet, which order, which screen - and the Requests page shows them.
+ *
  * @package dpl-pet-breeds
  */
 
 defined( 'ABSPATH' ) || exit;
 
 class DPL_Breeds_Requests {
+
+	/** Occasions kept per request, newest last. The first requester is also in pet_id/user_id. */
+	const MAX_SOURCES = 50;
+
+	/** The ids a caller can attach to a request. Anything else in the context is ignored. */
+	const CONTEXT_IDS = array( 'user_id', 'pet_id', 'order_id', 'prescription_id' );
 
 	private static function table() {
 		global $wpdb;
@@ -36,6 +47,60 @@ class DPL_Breeds_Requests {
 	}
 
 	/**
+	 * One occasion a string was asked for, from the caller's context. Pure: no database.
+	 *
+	 * Ids are kept when they are positive integers; `source` names the screen ('my-pets',
+	 * 'staff-pet', 'prescription', 'scanner' - whatever the caller calls itself, as a key). The
+	 * current user is recorded when the caller gave none, because the member of staff or the
+	 * customer saving the pet is who asked.
+	 *
+	 * @param array $context As passed to dpl_breed_request() / dpl_breed_canonicalise().
+	 * @return array {at, user_id?, pet_id?, order_id?, prescription_id?, source?}
+	 */
+	public static function occasion( array $context ) {
+		$o = array( 'at' => current_time( 'mysql' ) );
+		foreach ( self::CONTEXT_IDS as $k ) {
+			if ( isset( $context[ $k ] ) && (int) $context[ $k ] > 0 ) {
+				$o[ $k ] = (int) $context[ $k ];
+			}
+		}
+		if ( empty( $o['user_id'] ) && (int) get_current_user_id() > 0 ) {
+			$o['user_id'] = (int) get_current_user_id();
+		}
+		if ( ! empty( $context['source'] ) && is_string( $context['source'] ) ) {
+			$s = substr( preg_replace( '/[^a-z0-9_\-]/', '', strtolower( $context['source'] ) ), 0, 32 );
+			if ( '' !== $s ) {
+				$o['source'] = $s;
+			}
+		}
+		return $o;
+	}
+
+	/**
+	 * The occasions stored on a row, oldest first. Pure.
+	 *
+	 * @param string|null $json The `sources` column.
+	 * @return array[]
+	 */
+	public static function sources( $json ) {
+		if ( ! is_string( $json ) || '' === $json ) {
+			return array();
+		}
+		$list = json_decode( $json, true );
+		return is_array( $list ) ? array_values( array_filter( $list, 'is_array' ) ) : array();
+	}
+
+	/** Append an occasion, keeping the newest MAX_SOURCES. Pure. */
+	public static function with_occasion( $json, array $occasion ) {
+		$list   = self::sources( $json );
+		$list[] = $occasion;
+		if ( count( $list ) > self::MAX_SOURCES ) {
+			$list = array_slice( $list, -self::MAX_SOURCES );
+		}
+		return wp_json_encode( $list );
+	}
+
+	/**
 	 * Declined strings people keep asking for.
 	 *
 	 * Repeated demand for something an admin rejected is the signal that the rejection was
@@ -56,6 +121,7 @@ class DPL_Breeds_Requests {
 	/**
 	 * File a request, or return a suggestion instead.
 	 *
+	 * @param array $context pet_id, user_id, order_id, prescription_id, source - see occasion().
 	 * @return array {created:bool, request_id:int, suggestion:array|null, message:string}
 	 */
 	public static function create( $raw, $species = '', array $context = array() ) {
@@ -92,6 +158,8 @@ class DPL_Breeds_Requests {
 				'message'    => 'Did you mean ' . $resolved['breeds'][0]['label'] . '?' );
 		}
 
+		$occasion = self::occasion( $context );
+
 		// Dedupe: five people asking for the same breed is one row with a count of five.
 		//
 		// Status matters here. The original query ignored it, so a REJECTED row matched and
@@ -101,14 +169,17 @@ class DPL_Breeds_Requests {
 		// unrequestable forever, and it should not hide the fact that people keep asking.
 		$t        = self::table();
 		$existing = $wpdb->get_row( $wpdb->prepare(
-			"SELECT id, request_count, status FROM `$t` WHERE species = %s AND normalised = %s
+			"SELECT id, request_count, status, sources FROM `$t` WHERE species = %s AND normalised = %s
 			 ORDER BY FIELD(status,'pending','rejected','approved'), id ASC LIMIT 1",
 			$species, $norm
 		), ARRAY_A );
 
 		if ( $existing && 'pending' === $existing['status'] ) {
 			$wpdb->update( $t,
-				array( 'request_count' => (int) $existing['request_count'] + 1 ),
+				array(
+					'request_count' => (int) $existing['request_count'] + 1,
+					'sources'       => self::with_occasion( $existing['sources'] ?? '', $occasion ),
+				),
 				array( 'id' => (int) $existing['id'] )
 			);
 			return array( 'created' => false, 'request_id' => (int) $existing['id'],
@@ -119,7 +190,10 @@ class DPL_Breeds_Requests {
 			// Keep counting so repeated demand is visible - declined_but_wanted() surfaces it -
 			// but do not silently reopen a decision an admin already made.
 			$wpdb->update( $t,
-				array( 'request_count' => (int) $existing['request_count'] + 1 ),
+				array(
+					'request_count' => (int) $existing['request_count'] + 1,
+					'sources'       => self::with_occasion( $existing['sources'] ?? '', $occasion ),
+				),
 				array( 'id' => (int) $existing['id'] )
 			);
 			return array( 'created' => false, 'request_id' => (int) $existing['id'],
@@ -133,10 +207,11 @@ class DPL_Breeds_Requests {
 			'suggestion'    => '',
 			'confidence'    => 0,
 			'request_count' => 1,
-			'pet_id'        => isset( $context['pet_id'] ) ? (int) $context['pet_id'] : null,
-			'user_id'       => isset( $context['user_id'] ) ? (int) $context['user_id'] : get_current_user_id(),
+			'pet_id'        => $occasion['pet_id'] ?? null,
+			'user_id'       => $occasion['user_id'] ?? null,
+			'sources'       => self::with_occasion( '', $occasion ),
 			'status'        => 'pending',
-			'created_date'  => current_time( 'mysql' ),
+			'created_date'  => $occasion['at'],
 		) );
 		$id = (int) $wpdb->insert_id;
 
@@ -144,28 +219,39 @@ class DPL_Breeds_Requests {
 		 * Fires when a new add-breed request is created.
 		 *
 		 * @param int   $id
-		 * @param array $data
+		 * @param array $data species, requested, normalised, and (2.7) the occasion: who asked,
+		 *                    from which pet, order and screen.
 		 */
 		do_action( 'dpl_breed_request_created', $id, array(
 			'species' => $species, 'requested' => $raw, 'normalised' => $norm,
-		) );
+		) + $occasion );
 
 		return array( 'created' => true, 'request_id' => $id, 'suggestion' => null,
 			'message' => 'Thanks - we will review this breed.' );
 	}
 
+	/**
+	 * The queue, most asked-for first. Each row carries `occasions`: sources() decoded.
+	 */
 	public static function pending() {
 		global $wpdb;
-		$t = self::table();
-		return (array) $wpdb->get_results(
+		$t    = self::table();
+		$rows = (array) $wpdb->get_results(
 			"SELECT * FROM `$t` WHERE status = 'pending' ORDER BY request_count DESC, created_date ASC",
 			ARRAY_A
 		);
+		foreach ( $rows as &$r ) {
+			$r['occasions'] = self::sources( $r['sources'] ?? '' );
+		}
+		return $rows;
 	}
 
 	/**
 	 * Approve a request: add the breed, then alias the requested string to it so the same
 	 * wording resolves next time without another request.
+	 *
+	 * The guards against a bin split (a duplicate label, a label the map shadows) live in
+	 * DPL_Breeds_Vocabulary::add_breed(), shared with the admin's Add a breed form.
 	 */
 	public static function approve( $id, $label = '', $species = '' ) {
 		global $wpdb;
@@ -177,82 +263,16 @@ class DPL_Breeds_Requests {
 
 		$species = self::normalise_species( $species ?: $row['species'] );
 		$label   = trim( $label ) ?: trim( $row['requested'] );
-		$slug    = DPL_Breeds_Repository::slugify( $label );
-		if ( '' === $slug || '' === $species ) {
-			return new WP_Error( 'invalid', 'A species and a recognised label are required.' );
+		if ( '' === $species ) {
+			return new WP_Error( 'invalid', 'A species is required.' );
 		}
 
-		// Refuse to create a bin split.
-		//
-		// Two ways approving a request can quietly damage the vocabulary, both of which we hit
-		// for real on 2026-09-02 and spent the evening unpicking:
-		//
-		//   1. the label duplicates one that already exists under a different slug, so the
-		//      picker offers two labels for one breed
-		//   2. the label is a reviewed map key pointing somewhere else, so the map (rung 1)
-		//      beats it and the new breed can never resolve to itself - it would sit in the
-		//      picker silently becoming something else
-		//
-		// Better to refuse and make the admin pick a distinct name than to add a breed that
-		// does not work.
-		$norm_label = DPL_Breeds_Repository::normalise( $label );
-
-		$clash = $wpdb->get_var( $wpdb->prepare(
-			"SELECT slug FROM `{$wpdb->prefix}" . DPL_BREEDS_TABLE . "`
-			 WHERE species = %s AND LOWER(label) = %s AND slug <> %s AND status = 'active' LIMIT 1",
-			$species, $norm_label, $slug
-		) );
-		if ( $clash ) {
-			return new WP_Error( 'duplicate_label', sprintf(
-				'%s already exists in %s as "%s". Approving it again would put two labels in the picker for one breed.',
-				$label, $species, $clash
-			) );
+		$breed_id = DPL_Breeds_Vocabulary::add_breed( $species, $label, array( $row['normalised'] ), 'request' );
+		if ( is_wp_error( $breed_id ) ) {
+			return $breed_id;
 		}
-
-		$resolved = DPL_Breeds_Resolver::resolve( $label, $species );
-		if ( 'resolved' === $resolved['status'] && 'map' === $resolved['rung'] ) {
-			// The whole result, so a cross keeps its flag: "Mixed breed" or "X (cross)" can
-			// never equal a plain label, which is exactly the refusal we want.
-			$dest = DPL_Breeds_Resolver::format( $resolved );
-			if ( $dest !== $label ) {
-				return new WP_Error( 'shadowed_by_map', sprintf(
-					'The reviewed map already sends "%s" to %s, which takes precedence. Adding it as a breed would leave it unreachable - correct the map instead.',
-					$label, $dest
-				) );
-			}
-		}
-
-		$breeds_t = $wpdb->prefix . DPL_BREEDS_TABLE;
-		$breed_id = $wpdb->get_var( $wpdb->prepare(
-			"SELECT id FROM `$breeds_t` WHERE species = %s AND slug = %s", $species, $slug
-		) );
-
-		if ( $breed_id ) {
-			// Reactivate rather than insert a duplicate; the slug is a public identifier.
-			$wpdb->update( $breeds_t, array( 'status' => 'active', 'label' => $label ),
-				array( 'id' => (int) $breed_id ) );
-		} else {
-			$wpdb->insert( $breeds_t, array(
-				'species'    => $species,
-				'slug'       => $slug,
-				'label'      => $label,
-				'entry_type' => 'breed',
-				'source'     => 'request',
-				'pet_count'  => 0,
-				'sort_order' => 9999,
-				'status'     => 'active',
-			) );
-			$breed_id = (int) $wpdb->insert_id;
-		}
-
-		$wpdb->query( $wpdb->prepare(
-			"INSERT IGNORE INTO `{$wpdb->prefix}" . DPL_BREEDS_ALIAS_TABLE . "` (species, alias, breed_id, source)
-			 VALUES (%s, %s, %d, 'request')",
-			$species, $row['normalised'], (int) $breed_id
-		) );
 
 		$wpdb->update( $t, array( 'status' => 'approved' ), array( 'id' => (int) $id ) );
-		DPL_Breeds_Repository::flush();
 
 		do_action( 'dpl_breed_request_approved', (int) $id, (int) $breed_id );
 		return (int) $breed_id;
@@ -262,6 +282,30 @@ class DPL_Breeds_Requests {
 		global $wpdb;
 		$wpdb->update( self::table(), array( 'status' => 'rejected' ), array( 'id' => (int) $id ) );
 		return true;
+	}
+
+	/** One line saying where a request came from, for an email. */
+	public static function describe_occasion( array $o ) {
+		$bits = array();
+		if ( ! empty( $o['user_id'] ) ) {
+			$bits[] = 'user #' . (int) $o['user_id'];
+		}
+		if ( ! empty( $o['pet_id'] ) ) {
+			$bits[] = 'pet #' . (int) $o['pet_id'];
+		}
+		if ( ! empty( $o['order_id'] ) ) {
+			$bits[] = 'order #' . (int) $o['order_id'];
+		}
+		if ( ! empty( $o['prescription_id'] ) ) {
+			$bits[] = 'prescription #' . (int) $o['prescription_id'];
+		}
+		if ( ! empty( $o['source'] ) ) {
+			$bits[] = 'via ' . $o['source'];
+		}
+		if ( ! empty( $o['at'] ) ) {
+			$bits[] = $o['at'];
+		}
+		return implode( ', ', $bits );
 	}
 
 	/** One digest a day, not one email per request. */
@@ -284,6 +328,10 @@ class DPL_Breeds_Requests {
 				$r['species'] ?: 'no species',
 				$r['suggestion'] ? '  - possible match: ' . $r['suggestion'] : ''
 			);
+			$last = end( $r['occasions'] );
+			if ( $last ) {
+				$lines[] = '      last asked: ' . self::describe_occasion( $last );
+			}
 		}
 		$lines[] = '';
 		$lines[] = admin_url( 'admin.php?page=dpl-breeds-requests' );

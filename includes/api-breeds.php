@@ -207,7 +207,10 @@ if ( ! function_exists( 'dpl_breed_canonicalise' ) ) {
 	 *
 	 * @param string $raw
 	 * @param string $species Any spelling - 'dog', 'Canine (Dog)', 'guinea pig'.
-	 * @param array  $context request (bool), accept_suggestion (bool), pet_id, user_id.
+	 * @param array  $context request (bool), accept_suggestion (bool), and - recorded on a request
+	 *                        so the admin approving it knows where it came from (2.4) - pet_id,
+	 *                        user_id, order_id, prescription_id, and source: a key naming the
+	 *                        screen ('my-pets', 'staff-pet', 'prescription', 'scanner').
 	 * @return array {value, status, breeds, cross, changed, species, suggestion, request}
 	 */
 	function dpl_breed_canonicalise( $raw, $species = '', array $context = array() ) {
@@ -247,10 +250,15 @@ if ( ! function_exists( 'dpl_breed_request' ) ) {
 	 * Runs the resolver first: if the string is really a misspelling, this returns the
 	 * suggestion instead of creating a request, so most requests never get created.
 	 *
+	 * Every call is remembered on the request (2.4): pass what you have of pet_id, user_id,
+	 * order_id, prescription_id and source (a key for your screen, e.g. 'my-pets'), and the
+	 * Requests page shows who asked, from which pet and order. user_id defaults to the current
+	 * user.
+	 *
 	 * @param string $raw
 	 * @param string $species
-	 * @param array  $context pet_id, user_id.
-	 * @return array {created:bool, request_id:int, suggestion:array|null}
+	 * @param array  $context pet_id, user_id, order_id, prescription_id, source.
+	 * @return array {created:bool, request_id:int, suggestion:array|null, message:string}
 	 */
 	function dpl_breed_request( $raw, $species = '', array $context = array() ) {
 		return DPL_Breeds_Requests::create( $raw, $species, $context );

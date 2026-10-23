@@ -9,9 +9,15 @@ defined( 'ABSPATH' ) || exit;
 
 class DPL_Breeds_Activator {
 
-	/** The SCHEMA version. Bump only when a table changes shape. */
+	/**
+	 * The SCHEMA version. Bump only when a table changes shape.
+	 *
+	 * 1.1.0 (2.7): vpp_breed_requests gains `sources` - every occasion a string was asked for,
+	 * with who, which pet and which order. dbDelta adds the column; existing rows keep working
+	 * with it empty.
+	 */
 	const VERSION_OPTION = 'dpl_breeds_db_version';
-	const DB_VERSION     = '1.0.0';
+	const DB_VERSION     = '1.1.0';
 
 	/** What was last seeded: plugin version + a fingerprint of the shipped data files. */
 	const SEEDED_OPTION = 'dpl_breeds_seeded';
@@ -287,6 +293,7 @@ class DPL_Breeds_Activator {
 			request_count mediumint(8) UNSIGNED NOT NULL DEFAULT 1,
 			pet_id        bigint(20) UNSIGNED          DEFAULT NULL,
 			user_id       bigint(20) UNSIGNED          DEFAULT NULL,
+			sources       longtext,
 			status        varchar(16)         NOT NULL DEFAULT 'pending',
 			created_date  datetime                     DEFAULT NULL,
 			PRIMARY KEY  (id),
@@ -365,14 +372,15 @@ class DPL_Breeds_Activator {
 			}
 		}
 
+		$manual = DPL_Breeds_Vocabulary::manual_sources_sql();
 		if ( $retire_absent ) {
-			// source = 'request' is excluded deliberately. An approved add-breed request lives
-			// OUTSIDE the shipped seed by definition, so retiring everything absent from the
-			// seed file wiped every breed an admin had approved - on every re-seed, silently.
-			// The alias cleanup below already had this exemption ("WHERE source <> 'request'");
-			// the breed table did not, and that asymmetry was the bug.
+			// The manual sources ('request', and 'admin' since 2.7) are excluded deliberately. A
+			// breed a person added lives OUTSIDE the shipped seed by definition, so retiring
+			// everything absent from the seed file wiped every breed an admin had approved - on
+			// every re-seed, silently. The alias cleanup below already had this exemption
+			// ("WHERE source <> 'request'"); the breed table did not, and that asymmetry was the bug.
 			$rows = $wpdb->get_results(
-				"SELECT id, species, slug FROM `$breeds_t` WHERE status = 'active' AND source <> 'request'",
+				"SELECT id, species, slug FROM `$breeds_t` WHERE status = 'active' AND source NOT IN ($manual)",
 				ARRAY_A
 			);
 			foreach ( (array) $rows as $r ) {
@@ -384,10 +392,10 @@ class DPL_Breeds_Activator {
 			}
 		}
 
-		// Approved requests are not in the seed file, so their ids were never collected above.
+		// Breeds a person added are not in the seed file, so their ids were never collected above.
 		// The alias pass needs them, or a re-seed drops the aliases pointing at them.
 		$req_rows = $wpdb->get_results(
-			"SELECT id, species, slug FROM `$breeds_t` WHERE status = 'active' AND source = 'request'",
+			"SELECT id, species, slug FROM `$breeds_t` WHERE status = 'active' AND source IN ($manual)",
 			ARRAY_A
 		);
 		foreach ( (array) $req_rows as $r ) {
@@ -398,7 +406,7 @@ class DPL_Breeds_Activator {
 
 		/* ---- aliases: source strings become searchable aliases of their destination ---- */
 		$slugify = array( 'DPL_Breeds_Repository', 'slugify' );
-		$wpdb->query( "DELETE FROM `$aliases_t` WHERE source <> 'request'" );
+		$wpdb->query( "DELETE FROM `$aliases_t` WHERE source NOT IN ($manual)" );
 		$batch = array();
 		foreach ( self::map_aliases( $map ) as $source => $label ) {
 			$slug = call_user_func( $slugify, $label );

@@ -46,21 +46,26 @@ class DPL_Breeds_Repository {
 		}
 
 		// Clinical names appear in the export; they carry none of our keys as substrings.
+		// 'bovine' and 'cattle' only answer once a 'cow' species exists (2.7: an admin can add one).
 		$latin = array(
 			'canine' => 'dog',    'feline'  => 'cat',   'equine'  => 'horse',
 			'lapine' => 'rabbit', 'avian'   => 'bird',  'porcine' => 'pig',
 			'ovine'  => 'sheep',  'caprine' => 'sheep', 'murine'  => 'rodent',
+			'bovine' => 'cow',    'cattle'  => 'cow',
 		);
+		// Whole words: 'bovine' contains 'ovine', and a substring match sent cattle to the sheep list.
 		foreach ( $latin as $word => $key ) {
-			if ( false !== strpos( $species, $word ) && in_array( $key, $known, true ) ) {
+			if ( in_array( $key, $known, true ) && preg_match( '/(?<![a-z0-9])' . $word . '(?![a-z0-9])/', $species ) ) {
 				return $key;
 			}
 		}
 
-		// 'Canine (Dog)' and 'guinea pig' both resolve by substring. $known is alphabetical, so
-		// 'guinea' is tested before 'pig' and wins - which is the answer we want.
+		// 'Canine (Dog)' and 'guinea pig' both resolve by a whole word. $known is alphabetical, so
+		// 'guinea' is tested before 'pig' and wins - which is the answer we want. A whole word, not
+		// a substring: 'cattle' starts with 'cat', and a plain substring match sent cattle to the
+		// cat list.
 		foreach ( $known as $key ) {
-			if ( false !== strpos( $species, $key ) ) {
+			if ( preg_match( '/(?<![a-z0-9])' . preg_quote( $key, '/' ) . '(?![a-z0-9])/', $species ) ) {
 				return $key;
 			}
 		}
@@ -85,14 +90,13 @@ class DPL_Breeds_Repository {
 	 * resolve() in loops during their own imports, so per-call queries would be wasteful.
 	 */
 	public static function vocabulary() {
-		static $vocab = null;
-		if ( null !== $vocab ) {
-			return $vocab;
+		if ( null !== self::$vocab ) {
+			return self::$vocab;
 		}
 		$cached = wp_cache_get( 'vocabulary', 'dpl_breeds' );
 		if ( is_array( $cached ) ) {
-			$vocab = $cached;
-			return $vocab;
+			self::$vocab = $cached;
+			return self::$vocab;
 		}
 
 		global $wpdb;
@@ -119,10 +123,21 @@ class DPL_Breeds_Repository {
 		}
 
 		wp_cache_set( 'vocabulary', $vocab, 'dpl_breeds', 5 * MINUTE_IN_SECONDS );
+		self::$vocab = $vocab;
 		return $vocab;
 	}
 
+	/** The per-request copy. A property, not a static local, so flush() can forget it (2.7). */
+	private static $vocab = null;
+
+	/**
+	 * Forget the vocabulary, in this request and in the object cache. Until 2.7 only the object
+	 * cache was cleared, so a breed added in this request was invisible to resolve() until the
+	 * next one - the admin pages always redirected, so nothing noticed, but a test would.
+	 */
 	public static function flush() {
+		self::$vocab       = null;
+		self::$cross_names = null;
 		wp_cache_delete( 'vocabulary', 'dpl_breeds' );
 		wp_cache_delete( 'cross_names', 'dpl_breeds' );
 	}
@@ -142,16 +157,16 @@ class DPL_Breeds_Repository {
 	 *                 row per value, named after the matching spelling with the most `pets`.
 	 */
 	public static function cross_names( $species = '' ) {
-		static $all = null;
-		if ( null === $all ) {
+		if ( null === self::$cross_names ) {
 			$cached = wp_cache_get( 'cross_names', 'dpl_breeds' );
 			if ( is_array( $cached ) ) {
-				$all = $cached;
+				self::$cross_names = $cached;
 			} else {
-				$all = self::build_cross_names();
-				wp_cache_set( 'cross_names', $all, 'dpl_breeds', 5 * MINUTE_IN_SECONDS );
+				self::$cross_names = self::build_cross_names();
+				wp_cache_set( 'cross_names', self::$cross_names, 'dpl_breeds', 5 * MINUTE_IN_SECONDS );
 			}
 		}
+		$all = self::$cross_names;
 		if ( '' === $species ) {
 			return $all;
 		}
@@ -159,6 +174,9 @@ class DPL_Breeds_Repository {
 			return $c['species'] === $species;
 		} ) );
 	}
+
+	/** Per-request copy of cross_names(), forgotten by flush(). */
+	private static $cross_names = null;
 
 	private static function build_cross_names() {
 		$file   = DPL_BREEDS_PATH . 'includes/data/breed-map.php';
